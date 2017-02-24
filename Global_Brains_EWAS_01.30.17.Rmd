@@ -23,6 +23,8 @@ setwd("/Users/ar3054/Documents/R/Global/")
 
 # Summary
 
+This is a test
+
 This document describes the data, analysis plan, and results for the Drakenstein Global Brains EWAS, which focuses on a  three-group comparison of non-trauma expsed, trauma exposed, and those with probable PTSD using the R package limma. There are 120 participants avialable for the analysis, of which 20 (16.7%) are neither trauma-exposed nor have PTSD, 85 (70.8%) are trauma-exposed but do not have PTSD, 12 (10%) have PTSD, and 3 (2.5%) have missing values for trauma exposure, PTSD, or a key covariate. Significant associations were found between race, gender, maternal age, marital status, and prenatal tobacco use and the first 20 principal components. These variables were included in the EWAS as covariates. A single CpG site (cg01466491) in Chromosome 19 was found to be differentially methylated in trauma-exposed versus controls and in trauma-exposed versus trauma + PTSD individuals. Trauma-exposed individuals had higher methylation while controls, and to a greater extent those with PTSD, had lower methylation on average. 
 
 \newpage
