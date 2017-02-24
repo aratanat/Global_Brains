@@ -1,0 +1,569 @@
+---
+title: 'Global Brains: EWAS'
+mainfont: Arial
+date: "01/31/2017"
+output:
+  pdf_document:
+    includes:
+      in_header: header.tex
+    latex_engine: xelatex
+    toc: yes
+    toc_depth: 4
+  word_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, echo=F, warning=F, message=F}
+setwd("/Users/ar3054/Documents/R/Global/")
+#setwd("/Users/ly2207/Documents/Andrew/R/Global/")
+```
+
+# Summary
+
+This document describes the data, analysis plan, and results for the Drakenstein Global Brains EWAS, which focuses on a  three-group comparison of non-trauma expsed, trauma exposed, and those with probable PTSD using the R package limma. There are 120 participants avialable for the analysis, of which 20 (16.7%) are neither trauma-exposed nor have PTSD, 85 (70.8%) are trauma-exposed but do not have PTSD, 12 (10%) have PTSD, and 3 (2.5%) have missing values for trauma exposure, PTSD, or a key covariate. Significant associations were found between race, gender, maternal age, marital status, and prenatal tobacco use and the first 20 principal components. These variables were included in the EWAS as covariates. A single CpG site (cg01466491) in Chromosome 19 was found to be differentially methylated in trauma-exposed versus controls and in trauma-exposed versus trauma + PTSD individuals. Trauma-exposed individuals had higher methylation while controls, and to a greater extent those with PTSD, had lower methylation on average. 
+
+\newpage
+
+```{r, warning=F, message=F}
+library(reshape2)
+library(ggplot2)
+library(knitr)
+library(limma)
+library(ChAMP)
+```
+
+# Methods
+
+## Data
+
+### Phenotype Data
+
+Phenotype data was sent by Lesley Workman on 09/28/2016: "epi-genetics_data_12JUN2016.csv", which includes trauma, PTSD, and covariates. An email exchange with Lesley and Nastassja Koen in September 2016 outlined the covariates of interest (described below).
+
+### Methylation Data
+
+Two methylation datasets are required for the analysis:
+
+1. "2016.01.20drak_final_noreps.Rdata" - QC'ed data sent by Meaghan Jones on 08/14/2016.
+
+2. IDAT file - raw data sent by Meaghan jones on 01/18/2017.
+
+#### Cell Types estimation
+
+Per a discussion on 11/24/2016 with Nastassja Koen and Meaghan Jones, the reference free method for cell type adjustment was determined to be inadequate. Instead, cell types should be estimated using the minfi estimate cell counts function, but using the Norwegian Cord Blood data as reference (FlowSorted.CordBloodNorway.450k_1.1.2.tar.gz). 
+
+\ 
+
+```{r, eval=F}
+# The following code was run on Columbia's HPC, R v 3.2.5:
+
+library(minfi)
+library(FlowSorted.CordBloodNorway.450k)
+
+baseDir<-"/ifs/scratch/msph/epi/ar3054/Global/IDATS"
+targets <- read.metharray.sheet(base=baseDir)
+rgSet<-read.metharray.exp(targets = targets)
+cellEst<-estimateCellCounts(rgSet = rgSet, compositeCellType = "CordBloodNorway",
+                             cellTypes = c("CD8T","CD4T", "NK","Bcell","Mono","Gran"),
+                             returnAll = FALSE, meanPlot = FALSE, verbose = TRUE)
+lymph<-apply(cellEst[, c("CD8T", "CD4T", "NK", "Bcell")], 1, sum)
+cellEst<-cbind(cellEst, lymph)
+save(cellEst, file="Global_cellEst.Rdata")
+```
+
+#### Loading QC'ed Data and Phenotypes
+
+In the finalized QC'ed data sent by Meaghan Jones, there were 128 samples, which included 8 samples that were contaminated. The final analysis dataset then contains 120 participants.
+
+Per an email discussion in September 2016 with Nastassja Koen and Lesley Workman, the corresponding variables are:
+
+* Recruitment Site = "site"
+* Ethnicity = "race"
+* Sex = "sex"
+* Birth Anthropometry = "weight_z"
+* Maternal Age = "mothers_age"
+* Marital Status = "marital_status_new"
+* Average Household Income = ??? "average_household_income". This is the three group comparison
+* Depression = "BDI_Threshold"
+* Psychological Distress = "SRQ_Threshold"
+* Antenatal Tobacco Use = "tobacco_preg_any"
+* Antenatal Alcohol Use = "alcohol_preg_any". Used for a sensitivity analysis
+* Trauma exposed = trauma. This variable was created from the variable "new_trauma_PTSD_broad_ANC2", where 0 = no trauma exposure, and 1 = trauma exposed including those with probable PTSD
+* PTSD variable = PTSD. This variable was created from the variable "new_trauma_PTSD_broad_ANC2", where 0 = no PTSD and 1 = probable PTSD
+
+\ 
+
+```{r, eval=F}
+library(lumi)
+# Load QC'ed M-values
+load("2016.01.20drak_final_noreps.Rdata")
+mvalues<-exprs(drak.final)
+
+# Load Pheno and change columns to Barcodes
+p<-pData(drak.final) 
+all(colnames(mvalues)==rownames(p))
+colnames(mvalues)<-as.character(p$Barcode)
+rm(drak.final)
+
+# Convert to Beta Matrix
+betas<-m2beta(mvalues)
+rm(mvalues)
+
+# Remove contaminated samples
+cont<-read.csv("contaminated_samples.csv", row.names=1)
+rownames(cont)<-cont$Barcode
+all(colnames(beta)%in%rownames(cont))
+cont<-cont[colnames(betas), ]
+all(rownames(cont)==colnames(betas))
+cont<-cont[cont$Contaminated.=="",]
+betas<-betas[, rownames(cont)]
+
+# Saving phenotypes for just these 120 participants
+pheno<-read.csv("epi-genetics_data_12JUN2016.csv", stringsAsFactors=F)
+pheno<-pheno[pheno$barcode_id_cbhep%in%colnames(betas),]
+rownames(pheno)<-pheno$barcode_id_cbhep
+rownames(p)<-p$Barcode
+all(rownames(pheno)%in%rownames(p))
+p<-p[rownames(pheno), ]
+all(rownames(pheno)%in%colnames(betas))
+betas<-betas[, rownames(pheno)]
+all(rownames(pheno)==colnames(beta))
+all(rownames(pheno)==rownames(p))
+colnames(p)
+pheno$Sentrix_ID<-p$Sentrix_ID
+pheno$Sentrix_Position<-p$Sentrix_Position
+
+vars<-c("barcode_id_cbhep", "site", "race", "sex", "weight_z", "mothers_age", 
+        "marital_status_new", "average_household_income", "BDI_Threshold", 
+        "SRQ_Threshold","tobacco_preg_any", "alcohol_preg_any", 
+        "new_trauma_PTSD_broad_ANC2", "Sentrix_ID", "Sentrix_Position")
+pheno<-pheno[, vars]
+pheno[which(pheno=="", arr.ind=T)]<-NA
+
+# Site
+pheno[which(pheno$site=="TC Newman"), "site"]<-"TC_Newman"
+pheno$site<-factor(pheno$site, levels=c("Mbekweni", "TC_Newman"))
+
+# Race
+pheno$race<-factor(pheno$race, levels=c("Black", "Coloured"))
+
+# Sex
+pheno$sex<-factor(pheno$sex, levels=c("Male", "Female"))
+
+# Marital Status
+pheno$marital_status_new<-factor(pheno$marital_status_new, levels=c("Single", "married"))
+
+# Household Income
+pheno$average_household_income[which(pheno$average_household_income=="< R1,000/month")]<-0
+pheno$average_household_income[which(
+  pheno$average_household_income=="R1,000 - R5,000/month")]<-1
+pheno$average_household_income[which(pheno$average_household_income=="> R5,000/month")]<-2
+pheno$average_household_income<-factor(pheno$average_household_income, levels=c(0, 1, 2))
+
+# BDI Threshold
+pheno$BDI_Threshold[which(pheno$BDI_Threshold=="Below threshold")]<-"Below"
+pheno$BDI_Threshold[which(pheno$BDI_Threshold=="Above threshold")]<-"Above"
+pheno$BDI_Threshold<-factor(pheno$BDI_Threshold, levels=c("Below", "Above"))
+
+# SRQ Threshold
+pheno$SRQ_Threshold[which(pheno$SRQ_Threshold=="Below threshold")]<-"Below"
+pheno$SRQ_Threshold[which(pheno$SRQ_Threshold=="Above threshold")]<-"Above"
+pheno$SRQ_Threshold<-factor(pheno$SRQ_Threshold, levels=c("Below", "Above"))
+
+# Tobacoo Use
+pheno$tobacco_preg_any[which(pheno$tobacco_preg_any=="Any use")]<-"Yes"
+pheno$tobacco_preg_any[which(pheno$tobacco_preg_any=="No use")]<-"No"
+pheno$tobacco_preg_any<-factor(pheno$tobacco_preg_any, levels=c("No", "Yes"))
+
+# Alcohol Use
+pheno$alcohol_preg_any[which(pheno$alcohol_preg_any=="Any use")]<-"Yes"
+pheno$alcohol_preg_any[which(pheno$alcohol_preg_any=="No use")]<-"No"
+pheno$alcohol_preg_any<-factor(pheno$alcohol_preg_any, levels=c("No", "Yes"))
+
+# Defining Trauma
+pheno$trauma<-NA
+pheno[which(pheno$new_trauma_PTSD_broad_ANC2=="No exposure"), "trauma"]<-0
+pheno[which(pheno$new_trauma_PTSD_broad_ANC2=="Trauma-exposed" |
+        pheno$new_trauma_PTSD_broad_ANC2=="Suspected PTSD"), "trauma"]<-1
+
+# Defining PTSD
+pheno$PTSD<-NA
+pheno[which(pheno$new_trauma_PTSD_broad_ANC2=="Trauma-exposed" |
+        pheno$new_trauma_PTSD_broad_ANC2=="No exposure"), "PTSD"]<-0
+pheno[which(pheno$new_trauma_PTSD_broad_ANC2=="Suspected PTSD"), "PTSD"]<-1
+
+save(pheno, file="Global_pheno.Rdata")
+save(betas, file="Global_QCed_uncontaminated_beta.Rdata")
+```
+
+#### PTSD and Depression Overlap
+
+```{r}
+load("Global_pheno.Rdata")
+tab<-table(pheno$BDI_Threshold, pheno$PTSD)
+colnames(tab)<-c("PTSD-", "PTSD+")
+kable(tab, caption="PTSD and Depression Status")
+```
+
+~41% of those with PTSD also scored above threshold for Depression on the BDI.  
+
+#### Cell Type Adjustment
+
+Based on code from Jones (2015), the QC'ed beta matrix will be adjusted by using the cell type proportions to estmiate DNAm at each CpG site *i* and then the residuals added to the mean beta value for each site to get an adjusted beta matrix. This beta matrix is then converted into m-values for analysis.
+
+\ 
+
+```{r, eval=F}
+library(lumi)
+
+load("Global_QCed_uncontaminated_beta.Rdata")
+load("Global_cellEst.Rdata")
+load("Global_pheno.Rdata")
+
+all(rownames(pheno)==colnames(beta))
+colnames(betas)<-paste(pheno$Sentrix_ID, pheno$Sentrix_Position, sep="_")
+all(colnames(betas)%in%rownames(cellEst))
+cellEst<-cellEst[colnames(betas),]
+all(rownames(cellEst)==colnames(betas))
+
+
+# Note: missing code to subset cell estimates for QC'ed participants
+
+# Step 1: Predict DNAm using just cell type proportions, dropping Granulocytes
+beta.lm<-apply(betas, 1, function(x){ # betas = qc'ed beta matrix
+  cellEst[colnames(betas),]->blood # diff = cell counts. Sample x Cell Type
+  blood<-data.frame(blood) # added this.
+  #lm(x~CD8T+CD4T+NK+Bcell+Mono+Gran,data=blood)
+  lm(x~lymph+Mono,data=blood) # lympocytes combined, dropped Granulocytes 
+})
+
+# Step 2: Extract residuals
+residuals<-t(sapply(beta.lm,function(x)residuals (summary(x))))
+colnames(residuals)<-colnames(betas)
+
+# Step 3: Add residuals to mean methylation for each probe
+adj.betas<-residuals+matrix(apply(betas, 1, mean), nrow=nrow(residuals), 
+                            ncol=ncol(residuals))
+
+# Step 4: Log transform data back to M-values
+adj.m<-beta2m(adj.betas)
+
+#save(adj.m, file="Global_QCed_adjusted_beta.Rdata")
+```
+
+
+#### Principal Components Analysis
+
+```{r, eval=F}
+rm(list=ls())
+load("Global_QCed_adjusted_beta.Rdata")
+load("Global_pheno.Rdata")
+
+# Mean replacement of missing values
+sum(is.na(adj.m))
+means<-apply(adj.m, 1, mean, na.rm=T)
+
+for(ii in 1:nrow(adj.m)){
+  if(sum(is.na(adj.m[ii,]))>0){
+    adj.m[ii,][which(is.na(adj.m[ii,]))]<-mean(adj.m[ii, ], na.rm=T)
+  }
+}
+
+sum(is.na(adj.m))
+means.test<-apply(adj.m,1,mean)
+all(means.test==means) # the means of each row are the same but no missing data now
+sum(means.test!=means) # should be zero
+
+# Running PCA 
+rownames(pheno)<-paste(pheno$Sentrix_ID, pheno$Sentrix_Position, sep="_")
+all(rownames(pheno)%in%colnames(adj.m))
+pheno<-pheno[colnames(adj.m), ]
+all(rownames(pheno)==colnames(adj.m))
+
+adj.m<-t(adj.m)
+PCobj<-prcomp(adj.m, retx = T, center = T, scale. = T)
+PCs<-PCobj$x
+save(PCs, file="GlobalBrains_PCA.Rdata")
+```
+
+\
+
+The heatmap below shows the associations between phenotypes and technical artifacts with the top 20 PCs. Broadly there were few associations with technical artifacts (row, column, and position), which is a good sign. Birth Anthropemetry (weight_z), BDI, SRQ, trauma, and Sentrix_ID (Chip) were not associated with any PCs. As a result, birth anthropemtry, BDI and SRQ can be dropped as potential covariates since our sample size is relatively small.  For this first analysis, we could also drop maternal alcohol use and average household income as thse are only associated with 1-2 PCs.   
+
+Race is almost identical to site, however there is one person who is "Coloured" at the Mbekweni site and this is the only difference between their collinearity. As a result, we'll use race rather than site as a covariate in the analyses below. 
+
+\ 
+
+```{r}
+rm(list=ls())
+load("GlobalBrains_PCA.Rdata")
+load("Global_pheno.Rdata")
+rownames(pheno)<-paste(pheno$Sentrix_ID, pheno$Sentrix_Position, sep="_")
+R<-20
+
+samps<-pheno
+samps$trauma<-factor(samps$trauma, levels=c(0, 1))
+samps$PTSD<-factor(samps$PTSD, levels=c(0, 1))
+samps$row<-substring(samps$Sentrix_Position, 1, 3)
+samps$row<-factor(samps$row, levels=c(paste("R0", 1:6, sep="")))
+samps$col<-substring(samps$Sentrix_Position, 4, 6)
+samps$col<-factor(samps$col, levels=c("C01", "C02"))
+sampsPC<-cbind(samps, PCs[, 1:R])
+
+# Runnign OLS
+cont<-c("mothers_age", "weight_z")
+pc.list<-paste("PC", 1:R, sep="")
+pvals<-NULL
+
+for(jj in 1:length(cont)){
+  temp<-NULL
+  for(ii in 1:length(pc.list)){
+    fit<-lm(sampsPC[,pc.list[ii]] ~ sampsPC[, cont[jj]])
+    p<-summary(fit)$coef[, "Pr(>|t|)"][2]
+    temp<-append(temp, p)
+  }
+  pvals<-rbind(pvals, temp)
+  rownames(pvals)[nrow(pvals)]<-cont[jj]
+}
+
+# Running ANOVAs
+vars<-c("site", "race", "sex", "marital_status_new", "average_household_income", 
+        "BDI_Threshold", "SRQ_Threshold", "tobacco_preg_any", "alcohol_preg_any", 
+        "trauma", "PTSD", "Sentrix_ID", "Sentrix_Position", "row", "col")
+
+for(jj in 1:length(vars)){
+  temp<-NULL
+  for(ii in 1:length(pc.list)){
+    fit<-aov(sampsPC[,pc.list[ii]] ~ sampsPC[, vars[jj]])
+    p<-summary(fit)[[1]]["Pr(>F)"][[1]][1]
+    temp<-append(temp, p)
+  }
+  pvals<-rbind(pvals, temp)
+  rownames(pvals)[nrow(pvals)]<-vars[jj]
+}
+colnames(pvals)<-pc.list
+write.csv(pvals, "Global_Brains_pvals.csv")
+
+# Heatmap
+vars<-append(cont, vars)
+pvals.m<-melt(pvals)
+pvals.m$Var1<-as.character(pvals.m$Var1)
+pvals.m$Var2<-as.character(pvals.m$Var2)
+pvals.m$level<-"p > 0.05"
+pvals.m[pvals.m[, "value"]<0.05 & pvals.m[, "value"]>0.01, "level"]<-"p < 0.05"
+pvals.m[pvals.m[, "value"]<0.01 & pvals.m[, "value"]>0.001, "level"]<-"p < 0.01"
+pvals.m[pvals.m[, "value"]<0.001 & pvals.m[, "value"]>0.00001, "level"]<-"p < 0.001"
+pvals.m[pvals.m[, "value"]<0.00001, "level"]<-"p < 0.00001"
+pvals.m$level<-factor(pvals.m$level, levels=c("p > 0.05", "p < 0.05", "p < 0.01", 
+                                              "p < 0.001", "p < 0.00001"))
+
+myColors<-c("white", "pink", "orange", "red", "darkred")
+names(myColors)<-levels(pvals.m$level)
+colScale<-scale_fill_manual(name="level", values=myColors)
+
+pvals.m$Var1<-factor(pvals.m$Var1, levels=vars)
+pvals.m$Var2<-factor(pvals.m$Var2, levels=rev(pc.list))
+
+pvals.m<-pvals.m[rev(order(pvals.m$Var2)),]
+p<-ggplot(pvals.m, aes(x=Var2, y=Var1))+
+  geom_tile(aes(fill=factor(level), width=0.7, height=0.7))+
+  colScale+coord_flip()+theme_bw()+
+  xlab("Principal Components")+ylab("Variables")+
+  ggtitle("Associations with Principal Components")+
+  theme( axis.text.x  = element_text(angle=90, vjust=0.5))
+```
+
+\blandscape
+
+```{r, echo=F, fig.height=7, fig.width=10}
+print(p)
+```
+
+
+\elandscape
+
+## Analysis
+
+Per an email from Nastassja Koen on August 16, 2016, we are interested in comparing the following three groups:
+
+1. Trauma + PTSD 
+
+2. Trauma without PTSD
+
+3. No trauma and thus no PTSD
+
+We can model this using the R package limma by running a standard linear regression with separate trauma and PTSD variables and then use a contrast matrix to test for separate effects of trauma and PTSD.
+
+### Statistical Model:
+
+Based on the above PCA, for each CpG site *i*, the following model is run:
+
+$Adjusted \; m-value_{i} = \beta_0 + \beta_1 Race + \beta_2 Sex +  \beta_3 Maternal \; Age + \beta_4 Marital \; Status + \beta_5 Antenatal \; Tobacco \; Use \; + \beta_6 Trauma \; Exposure \; + \beta_7 PTSD + \epsilon$
+
+(A) We test the following hypotheses:
+
+* $H_0: \beta_{6} = 0$. E.g., trauma has no effect on DNAm
+* $H_1: \beta_{7} = 0$. E.g., PTSD has not effect on DNAm
+* $H_2: \beta_{6} = \beta_{7} \; or \; 0 = \beta_{6}-\beta_{7}$. E.g., there is no difference between PTSD and trauma and just trauma.
+
+(B) Using the following contrast matrix:
+
+\ 
+
+```{r, message=F, warning=F}
+rm(list=ls())
+load("Global_pheno.Rdata")
+design<-model.matrix(~race+sex+mothers_age+marital_status_new+
+                       tobacco_preg_any+trauma+PTSD, data=pheno)
+
+cont.matrix<-makeContrasts(Diff = PTSD-trauma, trauma, PTSD, levels=design)
+kable(cont.matrix, caption="Contrast Matrix for testing three hypotheses")
+```
+
+(C) Finally an empirical Bayes adjustment is used and top results exported.
+
+\newpage
+
+# Results
+
+## Cohort Groupings
+
+```{r}
+rm(list=ls())
+load("Global_pheno.Rdata")
+tab<-matrix(nrow=5, ncol=3)
+colnames(tab)<-c("Group", "N", "%")
+tab[1, "N"]<-length(which(pheno$trauma==0))
+tab[2, "N"]<-length(which(pheno$trauma==1 & pheno$PTSD==0))
+tab[3, "N"]<-length(which(pheno$trauma==1 & pheno$PTSD==1))
+tab[4, "N"]<-length(which(is.na(pheno$trauma)))
+tab[5, "N"]<-sum(tab[, "N"], na.rm=T)
+tab[, "%"]<-paste(round((tab[,"N"]/tab[5, "N"])*100, 1), "%", sep="")
+tab[, "Group"]<-c("Trauma-/PTSD-", "Trauma+/PTSD-", "Trauma+/PTSD+", "Missing", "Total")
+kable(tab, caption="N participants by Trauma and PTSD status")
+```
+
+
+In addition to the the two individuals missing Trauma and PTSD information, there is one Trauma-exposed individual missing smoking information and are dropped from the analysis as well.
+
+## Limma Analysis
+
+```{r, eval=F}
+rm(list=ls())
+load("Global_pheno.Rdata")
+rownames(pheno)<-paste(pheno$Sentrix_ID, pheno$Sentrix_Position, sep="_")
+load("Global_QCed_adjusted_beta.Rdata")
+
+design<-model.matrix(~race+sex+mothers_age+marital_status_new+
+                       tobacco_preg_any+trauma+PTSD, data=pheno)
+
+adj.m<-adj.m[, rownames(design)]
+# all(rownames(design)==colnames(adj.m)) # Should be TRUE
+
+# Running Linear Models and Contrasts
+fit<-lmFit(adj.m, design) # Runs linear models
+contrast.matrix<-makeContrasts(Diff = PTSD-trauma, trauma, PTSD, levels=design)
+contrast.matrix # Contrast matrix extracts only the coefficient we are interested in
+rownames(contrast.matrix)[1]<-"(Intercept)" # Have to rename the contrast matrix
+
+fit2<-contrasts.fit(fit, contrast.matrix)
+fit2.ebayes<-eBayes(fit2) 
+
+# Saving results
+venn<-decideTests(fit2.ebayes)
+
+diff<-topTable(fit2.ebayes, coef="Diff", number=nrow(adj.m), adjust.method="BH")
+diff$FDR<-p.adjust(diff$P.Value, method="fdr", n=nrow(adj.m)*3)
+
+trauma<-topTable(fit2.ebayes, coef="trauma", number=nrow(adj.m), adjust.method="BH")
+trauma$FDR<-p.adjust(trauma$P.Value, method="fdr", n=nrow(adj.m)*3)
+
+ptsd<-topTable(fit2.ebayes, coef="PTSD", number=nrow(adj.m), adjust.method="BH")
+ptsd$FDR<-p.adjust(ptsd$P.Value, method="fdr", n=nrow(adj.m)*3)
+save(venn, diff, trauma, ptsd, file="Global_Brains_limma.Rdata")
+```
+
+\ 
+
+### Results
+
+The Venn diagram below shows the number of significant CpG sites across the three analysis that were significant for just one of the three hypotheses as well as those that overlapped. Note: Benjamini-Hochberg (BH) multiple testing correction was applied, but the number of hypotheses tested was 421,993 (the number of CpG sites in the dataset), which may not be the correct the number of test (more below). We rejected two hypotheses $H_0: \beta_6 = 0$ (i.e., no difference by trauma exposure) and $H_2: \beta_6 - \beta_7 = 0$ (i.e., the effect of PTSD and Trauma are the same).
+
+\ 
+
+```{r, echo=F, fig.height=3, fig.width=3, fig.align="center"}
+rm(list=ls())
+load("Global_Brains_limma.Rdata")
+vennDiagram(venn, cex=0.6)
+```
+
+\ 
+
+The tables below list the top 10 CpG sites from each of the analyses.  The "adjusted p" value corresponds to the BH correction for 421,999 hypotheses. The FDR column for a BH correction for 1,265,979 tests (421,993 x 3).  
+
+\newpage
+
+#### $H_0: \beta_6 = 0$
+
+```{r, echo=F}
+tab<-signif(trauma[1:10,], 4)
+tab$P.Value<-as.character(tab$P.Value)
+colnames(tab)<-c("beta coef", "Avg Expression", "t-statistic", "p-value", "adjusted p", "B", "FDR")
+kable(tab, caption="Results for the effect of Trauma")
+rm(tab)
+```
+
+#### $H_1: \beta_7 = 0$
+
+```{r, echo=F}
+tab<-signif(ptsd[1:10,], 4)
+tab$P.Value<-as.character(tab$P.Value)
+colnames(tab)<-c("beta coef", "Avg Expression", "t-statistic", "p-value", "adjusted p", "B", "FDR")
+kable(tab, caption="Results for the effect of PTSD")
+rm(tab)
+```
+
+
+#### $H_2: \beta_6 - \beta_7 = 0$
+
+```{r, echo=F}
+tab<-signif(diff[1:10,], 4)
+tab$P.Value<-as.character(tab$P.Value)
+colnames(tab)<-c("beta coef", "Avg Expression", "t-statistic", "p-value", "adjusted p", "B", "FDR")
+kable(tab, caption="Results for whether the effect of PTSD and Trauma are the same.")
+rm(tab)
+```
+
+\newpage
+
+A summary of the the results for the effect of Trauma, PTSD, and the different between them for cg01466491 is below. The beta coefficient for the Difference model is equal to the PTSD coefficient minus the Trauma coefficient. Since those who were trauma-exposed have increased methylation at cg01466491 compared to those without trauma and individuals with PTSD have lower methylation on average, there is a larger difference between trauma-exposed and trauma-exposed plus PTSD individuals than in either versus controls. 
+
+\
+
+```{r, echo=F}
+tab<-rbind(trauma["cg01466491", ], ptsd["cg01466491", ], diff["cg01466491", ])
+rownames(tab)<-c("Trauma", "PTSD", "Difference")
+colnames(tab)<-c("beta coef", "Avg Expression", "t-statistic", "p-value", "adjusted p", "B", "FDR")
+kable(tab, caption="Summary of Results for cg01466491")
+rm(tab)
+```
+
+The CpG site cg01466491 is in an intergenic region 4,086 bp away from the gene *PDE4A*, which is in chromosome 19. Full info from annotation in the R package ChAMP:
+
+```{r, echo=F}
+data(probe.features)
+kable(probe.features["cg01466491", ])
+```
+
+
+
+
+
+
+
+
+
+
